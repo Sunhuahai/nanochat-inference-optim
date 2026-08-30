@@ -22,6 +22,8 @@ See THIRD_PARTY_NOTICES.md.
 
 from __future__ import annotations
 
+from collections import deque
+
 import torch
 
 from nanochat.common import COMPUTE_DTYPE
