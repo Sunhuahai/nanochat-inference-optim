@@ -1,87 +1,83 @@
 # nanochat-inference-optim
 
-Small, interview-friendly inference optimizations for
-[karpathy/nanochat](https://github.com/karpathy/nanochat).
+为 [karpathy/nanochat](https://github.com/karpathy/nanochat) 实现的一组小型推理优化，
+重点是便于理解、验证和面试讲解。
 
-The goal is **not** to reimplement vLLM. This repository focuses on two small
-changes that are easy to understand, verify, and benchmark end to end.
+本项目的目标**不是**重新实现 vLLM，而是聚焦两个可以端到端分析和测试的改动。
 
-The implementation is aligned with upstream nanochat `master` at commit
-`92d63d4e8bb4df75c3b71618f31ddde2378b2bcd` (checked 2026-08-30).
+实现基于上游 nanochat `master` 的提交
+`92d63d4e8bb4df75c3b71618f31ddde2378b2bcd`（核对日期：2026-08-30）。
 
-## What is optimized?
+## 优化内容
 
-### 1. Single-sample KV Cache fast path
+### 1. 单样本 KV Cache 快速路径
 
-Current nanochat `Engine.generate()` performs a batch-1 prefill into a temporary
-KV cache and then allocates a decode cache and copies the prompt KV into it.
-That design is useful when one prompt is expanded to multiple samples, but for
-`num_samples=1` the copy is unnecessary.
+当前 nanochat 的 `Engine.generate()` 会先以 batch size 1 将 prompt prefill 到临时
+KV Cache，再分配 decode cache，并把 prompt KV 复制过去。当同一个 prompt 需要扩展成
+多个样本时，这种设计很有用；但在 `num_samples=1` 时，这次复制是不必要的。
 
-This project instead does:
+本项目改为：
 
 ```text
-Reference, num_samples=1
-prompt -> temporary prefill KV -> copy -> final decode KV -> decode
+原始实现，num_samples=1
+prompt -> 临时 prefill KV -> 复制 -> 最终 decode KV -> decode
 
-Optimized
-prompt -----------------------> final decode KV -> decode
+优化实现
+prompt ---------------------> 最终 decode KV -> decode
 ```
 
-This removes one prompt-sized KV allocation and one prompt-length KV copy.
-Expected impact: mostly **TTFT** and transient memory; little change to decode
-TPOT.
+这样可以省去一个 prompt 大小的 KV 分配，以及一次与 prompt 长度成正比的 KV 复制。
+预期主要影响 **TTFT** 和瞬时显存，对 decode 阶段的 TPOT 影响很小。
 
-### 2. Exact Prefix KV Cache
+### 2. 精确匹配 Prefix KV Cache
 
-When a token-identical prompt is repeated, the optimized engine can restore its
-prefill state instead of recomputing it.
+当完全相同的 token 序列再次出现时，优化后的引擎可以恢复已有 prefill 状态，
+无需重新计算。
 
 ```text
 prompt tokens
     |
     v
-BLAKE2 hash -> LRU lookup ---- hit ----> KV + logits + smear state
+BLAKE2 哈希 -> LRU 查询 ---- 命中 ----> KV + logits + smear 状态
                     |
-                   miss
+                   未命中
                     v
                  prefill
 ```
 
-The cache stores:
+Cache 保存：
 
 - K cache
 - V cache
-- final prefill logits
-- `prev_embedding` used by nanochat's smear operation
+- prefill 最后一个位置的 logits
+- nanochat smear 操作使用的 `prev_embedding`
 
-It is deliberately **exact-match only**. No radix tree, paging, custom CUDA, or
-continuous batching is required.
+该实现刻意只支持**完全匹配**，不引入 radix tree、分页、自定义 CUDA 或连续批处理。
 
-## Why this project is useful for interviews
+## 为什么适合面试讲解
 
-The code is small enough to explain line by line, but naturally connects to:
+代码量足够小，可以逐行说明，同时自然关联以下主题：
 
-- KV Cache memory calculation
-- GQA and KV memory reduction
-- Prefill vs Decode
-- TTFT vs TPOT
-- GPU asynchronous timing
-- Prefix Cache correctness
-- cache-memory / latency trade-offs
+- KV Cache 显存计算
+- GQA 与 KV 显存优化
+- Prefill 与 Decode
+- TTFT 与 TPOT
+- GPU 异步计时
+- Prefix Cache 正确性
+- Cache 显存与延迟的权衡
 
-See [`docs/interview_questions.md`](docs/interview_questions.md) for the expected
-follow-up questions.
+常见追问及回答要点见
+[`docs/interview_questions.md`](docs/interview_questions.md)。
 
-## Repository structure
+## 仓库结构
 
 ```text
 nanochat_optim/
-  engine.py          # optimized Engine
-  prefix_cache.py    # exact prompt LRU cache
+  engine.py           # 优化后的 Engine
+  prefix_cache.py     # 精确 prompt LRU cache
 benchmarks/
-  bench_inference.py  # TTFT / TPOT / throughput / peak-memory benchmark
-  check_correctness.py # greedy cold/warm equivalence check
+  bench_inference.py  # TTFT / TPOT / 吞吐 / 峰值显存 benchmark
+  check_correctness.py # greedy cold/warm 等价性检查
 tests/
   test_prefix_cache.py
 docs/
@@ -89,44 +85,42 @@ docs/
   interview_questions.md
 ```
 
-## Setup
+## 环境安装
 
-Dependencies are isolated in a repository-local `.venv` and locked with `uv`.
-The setup also creates a project-local checkout of the tested upstream nanochat
-commit under `.upstream/`; it does not install anything into the system Python.
+依赖通过 `uv` 锁定并安装在仓库内的 `.venv` 中。安装脚本还会把经过测试的
+nanochat 上游提交检出到项目内的 `.upstream/`；不会向系统 Python 安装任何包。
 
 ```bash
 bash scripts/setup_env.sh
 ```
 
-`uv` reuses its global download cache across projects, while each project keeps
-its own installed environment and upstream source. The wrapper
-`scripts/run_env.sh` selects both when running commands. Model artifacts follow
-nanochat's standard layout under `~/.cache/nanochat`; a base checkpoint therefore
-looks like `~/.cache/nanochat/base_checkpoints/d14/model_002192.pt`.
+`uv` 会在不同项目之间复用全局下载缓存，但每个项目拥有独立的安装环境和上游源码。
+运行命令时由 `scripts/run_env.sh` 同时选择二者。模型文件沿用 nanochat 的标准目录
+`~/.cache/nanochat`，例如 base checkpoint 路径为：
+`~/.cache/nanochat/base_checkpoints/d14/model_002192.pt`。
 
-## Run unit tests
+## 运行单元测试
 
-The standalone prefix-cache tests do not require a nanochat checkpoint:
+Prefix Cache 的独立测试不需要 nanochat checkpoint：
 
 ```bash
 scripts/run_env.sh pytest -q
 ```
 
-## Check correctness against upstream
+## 与上游实现进行正确性检查
 
-After a nanochat base checkpoint is available:
+准备好 nanochat base checkpoint 后运行：
 
 ```bash
 scripts/run_env.sh python benchmarks/check_correctness.py
 ```
 
-This uses greedy decoding and requires both the cold optimized path and a warm
-prefix-cache hit to exactly match upstream output tokens.
+该脚本使用 greedy decoding，要求优化后的 cold path 和 warm Prefix Cache path
+生成的 token 都与上游实现完全一致。
 
-## Run benchmark
+## 运行 benchmark
 
-After a nanochat base checkpoint is available:
+准备好 nanochat base checkpoint 后运行：
 
 ```bash
 scripts/run_env.sh python benchmarks/bench_inference.py \
@@ -136,68 +130,66 @@ scripts/run_env.sh python benchmarks/bench_inference.py \
   --output results/bench.csv
 ```
 
-The benchmark compares:
+Benchmark 对比：
 
-1. upstream `Engine`;
-2. optimized single-cache path with prefix cache disabled;
-3. warm exact-prefix cache hits.
+1. 上游 `Engine`；
+2. 关闭 Prefix Cache 的单 cache 快速路径；
+3. 精确 Prefix Cache 的 warm hit。
 
-It reports median:
+报告以下指标的中位数：
 
-- TTFT (time to first token)
-- TPOT (time per output token after the first)
-- E2E latency
-- output tokens/s
-- peak CUDA memory allocated
+- TTFT（首 token 延迟）
+- TPOT（首 token 之后的平均单 token 延迟）
+- E2E latency（端到端延迟）
+- output tokens/s（输出吞吐）
+- peak CUDA memory allocated（CUDA 峰值已分配显存）
 
-## What results should I expect?
+## 实测性能
 
-Do **not** hard-code a speedup into a resume before measurement.
+在目标 GPU 实测前，不应预先编造或写死性能提升数字。
 
-Expected trends:
+预期趋势：
 
-- single-cache fast path: avoided KV-copy work grows with prompt length, though
-  measured latency can be noisy; decode TPOT is nearly unchanged;
-- exact Prefix Cache: large TTFT reduction for repeated long prompts, at the cost
-  of keeping cached KV tensors in GPU memory.
+- 单 cache 快速路径：省去的 KV 复制工作量随 prompt 变长而增加，但延迟测量仍会有
+  噪声；decode TPOT 基本不变；
+- 精确 Prefix Cache：对重复长 prompt 可显著降低 TTFT，代价是将 KV 状态保留在
+  GPU 显存中。
 
-Measured on an NVIDIA GeForce RTX 4060 8GB with PyTorch 2.9.1+cu128,
-nanochat d14, greedy decoding, 64 generated tokens, and five repeats (median):
+以下数据在 NVIDIA GeForce RTX 4060 8GB、PyTorch 2.9.1+cu128、nanochat d14、
+greedy decoding、生成 64 个 token 的条件下测得，每项重复 5 次并取中位数：
 
-| Prompt | Baseline TTFT | Fast-path TTFT | Prefix-hit TTFT | Peak VRAM (base / fast / prefix) |
+| Prompt | Baseline TTFT | 快速路径 TTFT | Prefix 命中 TTFT | 峰值显存（baseline / fast / prefix） |
 |---:|---:|---:|---:|---:|
-| 128 | 8.51 ms | 7.99 ms (-6.15%) | 0.18 ms (-97.90%) | 1168.9 / 1169.1 / 1160.2 MB |
-| 512 | 15.23 ms | 14.98 ms (-1.61%) | 0.41 ms (-97.30%) | 1315.7 / 1319.2 / 1196.5 MB |
-| 1024 | 25.75 ms | 25.26 ms (-1.91%) | 0.72 ms (-97.19%) | 1554.0 / 1557.1 / 1245.0 MB |
-| 2048 | 48.06 ms | 46.72 ms (-2.79%) | 1.35 ms (-97.19%) | 2020.3 / 2023.3 / 1343.0 MB |
+| 128 | 8.51 ms | 7.99 ms（-6.15%） | 0.18 ms（-97.90%） | 1168.9 / 1169.1 / 1160.2 MB |
+| 512 | 15.23 ms | 14.98 ms（-1.61%） | 0.41 ms（-97.30%） | 1315.7 / 1319.2 / 1196.5 MB |
+| 1024 | 25.75 ms | 25.26 ms（-1.91%） | 0.72 ms（-97.19%） | 1554.0 / 1557.1 / 1245.0 MB |
+| 2048 | 48.06 ms | 46.72 ms（-2.79%） | 1.35 ms（-97.19%） | 2020.3 / 2023.3 / 1343.0 MB |
 
-Decode TPOT remained approximately 6.1-6.4 ms. The single-cache path reduced
-TTFT but did not reduce the measured peak-memory high-water mark on this setup;
-the Prefix Cache result is specifically for repeated, token-identical prompts.
+Decode TPOT 保持在约 6.1-6.4 ms。单 cache 快速路径降低了 TTFT，但在该环境中
+没有降低峰值显存高水位；Prefix Cache 数据专指 token 序列完全相同的重复 prompt。
 
-## Resume wording after benchmark
+## 简历表述
 
-> Analyzed nanochat's autoregressive inference path and built a TTFT/TPOT/
-> throughput/VRAM benchmark. On RTX 4060 with nanochat d14, reduced 2048-token
-> prompt TTFT from 48.06 to 46.72 ms (2.8%) by removing redundant single-sample
-> KV copying, and to 1.35 ms (97.2%) on exact-prefix hits; preserved greedy-token
-> equivalence across the upstream, optimized cold, and warm-cache paths.
+> 分析 nanochat 自回归推理链路并搭建 TTFT、TPOT、吞吐和显存 benchmark；
+> 在 RTX 4060、nanochat d14 上，通过移除单样本场景中冗余的 KV 复制，将
+> 2048-token prompt 的 TTFT 从 48.06 ms 降至 46.72 ms（2.8%），并通过精确
+> Prefix Cache 将重复 prompt 的 TTFT 降至 1.35 ms（97.2%）；验证上游、优化
+> cold path 和 warm-cache path 的 greedy token 完全一致。
 
-## Scope
+## 项目边界
 
-This is intentionally not a production serving engine. Out of scope:
+本项目不是生产级 serving engine，以下内容不在范围内：
 
 - PagedAttention
-- continuous batching
-- distributed inference
-- custom CUDA kernels
+- 连续批处理
+- 分布式推理
+- 自定义 CUDA kernel
 - CPU KV swapping
 - speculative decoding
 
-Those are good follow-up topics, but they would make this learning project much
-larger than necessary.
+这些都是合理的后续方向，但会使这个学习型项目明显膨胀。
 
-## Attribution
+## 第三方归属
 
-This project is an independent educational extension of nanochat. See
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+本项目是 nanochat 的独立教育性扩展，详见
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

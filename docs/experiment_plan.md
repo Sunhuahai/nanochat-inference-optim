@@ -1,19 +1,18 @@
-# Experiment plan
+# 实验方案
 
-The project intentionally tests only two small changes. Do not claim a speedup
-before measuring it on the target GPU.
+本项目刻意只验证两个小改动。在目标 GPU 上实测前，不应宣称具体性能提升。
 
-## A. Single-sample KV fast path
+## A. 单样本 KV Cache 快速路径
 
-Question: does avoiding the temporary prompt-sized cache and the prompt-KV copy
-reduce TTFT / peak transient memory for `num_samples=1`?
+问题：对 `num_samples=1`，避免临时 prompt cache 和 prompt KV 复制，能否降低
+TTFT 与瞬时峰值显存？
 
-Compare:
+对比对象：
 
 - `nanochat.engine.Engine`
 - `OptimizedEngine(prefix_cache_entries=0)`
 
-Workloads:
+工作负载：
 
 | Prompt tokens | New tokens | Temperature |
 |---:|---:|---:|
@@ -22,33 +21,31 @@ Workloads:
 | 1024 | 64 | 0 |
 | 2048 | 64 | 0 |
 
-Primary metrics: TTFT, E2E latency, peak allocated CUDA memory.
+主要指标：TTFT、E2E latency、CUDA 峰值已分配显存。
 
-Expected behavior: the gain should become easier to see as the prompt grows,
-because the avoided KV copy is proportional to prompt length. Decode TPOT should
-remain almost unchanged because the decode loop itself is unchanged.
+预期行为：省去的 KV 复制量与 prompt 长度成正比，因此长 prompt 下应更容易观察到
+收益；但真实延迟仍可能受运行时噪声影响。由于 decode loop 没有变化，decode TPOT
+应基本不变。
 
-## B. Exact Prefix KV Cache
+## B. 精确匹配 Prefix KV Cache
 
-Question: how much TTFT can be saved when the exact same long prompt is reused?
+问题：完全相同的长 prompt 被重复使用时，可以节省多少 TTFT？
 
-For each prompt length:
+对每个 prompt 长度执行：
 
-1. clear prefix cache;
-2. run one cold request to populate it;
-3. run repeated identical requests;
-4. compare warm-cache TTFT to baseline TTFT.
+1. 清空 Prefix Cache；
+2. 执行一次 cold request 填充 cache；
+3. 重复执行相同 request；
+4. 将 warm-cache TTFT 与 baseline TTFT 对比。
 
-Primary metric: TTFT. Secondary metrics: cache memory cost and hit rate.
+主要指标：TTFT。次要指标：cache 显存开销与命中率。
 
-Expected behavior: the cache trades extra GPU memory for avoiding prefill compute.
-It should mainly improve TTFT, not steady-state TPOT.
+预期行为：Prefix Cache 以额外 GPU 显存为代价，省去 prefill 计算；它应主要改善
+TTFT，而不是稳定 decode 阶段的 TPOT。
 
-## Correctness checks
+## 正确性检查
 
-Use greedy decoding (`temperature=0`) and compare token sequences from the
-reference and optimized engines. For prefix-cache tests, compare both cold and
-warm paths.
+使用 greedy decoding（`temperature=0`），比较上游和优化引擎生成的 token 序列。
+Prefix Cache 需要分别验证 cold path 与 warm path。
 
-The benchmark script uses CUDA synchronization around timing boundaries because
-CUDA kernel launches are asynchronous.
+由于 CUDA kernel 是异步启动的，benchmark 脚本会在计时边界执行 CUDA 同步。
