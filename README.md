@@ -91,26 +91,26 @@ docs/
 
 ## Setup
 
-Use the same Python environment as upstream nanochat.
+Dependencies are isolated in a repository-local `.venv` and locked with `uv`.
+The setup also creates a project-local checkout of the tested upstream nanochat
+commit under `.upstream/`; it does not install anything into the system Python.
 
 ```bash
-git clone https://github.com/karpathy/nanochat.git
-cd nanochat
-pip install -e .
-
-# clone this repository next to it or anywhere in the same environment
-pip install -e /path/to/nanochat-inference-optim
+bash scripts/setup_env.sh
 ```
 
-Upstream nanochat currently requires Python >=3.10 and provides its own PyTorch
-and GPU dependency setup. Follow its README for checkpoint preparation.
+`uv` reuses its global download cache across projects, while each project keeps
+its own installed environment and upstream source. The wrapper
+`scripts/run_env.sh` selects both when running commands. Model artifacts follow
+nanochat's standard layout under `~/.cache/nanochat`; a base checkpoint therefore
+looks like `~/.cache/nanochat/base_checkpoints/d14/model_002192.pt`.
 
 ## Run unit tests
 
 The standalone prefix-cache tests do not require a nanochat checkpoint:
 
 ```bash
-pytest -q
+scripts/run_env.sh pytest -q
 ```
 
 ## Check correctness against upstream
@@ -118,7 +118,7 @@ pytest -q
 After a nanochat base checkpoint is available:
 
 ```bash
-python benchmarks/check_correctness.py
+scripts/run_env.sh python benchmarks/check_correctness.py
 ```
 
 This uses greedy decoding and requires both the cold optimized path and a warm
@@ -129,7 +129,7 @@ prefix-cache hit to exactly match upstream output tokens.
 After a nanochat base checkpoint is available:
 
 ```bash
-python benchmarks/bench_inference.py \
+scripts/run_env.sh python benchmarks/bench_inference.py \
   --prompt-lengths 128 512 1024 2048 \
   --max-new-tokens 64 \
   --repeats 5 \
@@ -156,32 +156,32 @@ Do **not** hard-code a speedup into a resume before measurement.
 
 Expected trends:
 
-- single-cache fast path: benefit grows with prompt length; decode TPOT is nearly
-  unchanged;
+- single-cache fast path: avoided KV-copy work grows with prompt length, though
+  measured latency can be noisy; decode TPOT is nearly unchanged;
 - exact Prefix Cache: large TTFT reduction for repeated long prompts, at the cost
   of keeping cached KV tensors in GPU memory.
 
-Record real results in the table below after running on your GPU:
+Measured on an NVIDIA GeForce RTX 4060 8GB with PyTorch 2.9.1+cu128,
+nanochat d14, greedy decoding, 64 generated tokens, and five repeats (median):
 
-| Prompt | Baseline TTFT | Fast-path TTFT | Prefix-hit TTFT | Peak memory change |
+| Prompt | Baseline TTFT | Fast-path TTFT | Prefix-hit TTFT | Peak VRAM (base / fast / prefix) |
 |---:|---:|---:|---:|---:|
-| 128 | TBD | TBD | TBD | TBD |
-| 512 | TBD | TBD | TBD | TBD |
-| 1024 | TBD | TBD | TBD | TBD |
-| 2048 | TBD | TBD | TBD | TBD |
+| 128 | 8.51 ms | 7.99 ms (-6.15%) | 0.18 ms (-97.90%) | 1168.9 / 1169.1 / 1160.2 MB |
+| 512 | 15.23 ms | 14.98 ms (-1.61%) | 0.41 ms (-97.30%) | 1315.7 / 1319.2 / 1196.5 MB |
+| 1024 | 25.75 ms | 25.26 ms (-1.91%) | 0.72 ms (-97.19%) | 1554.0 / 1557.1 / 1245.0 MB |
+| 2048 | 48.06 ms | 46.72 ms (-2.79%) | 1.35 ms (-97.19%) | 2020.3 / 2023.3 / 1343.0 MB |
+
+Decode TPOT remained approximately 6.1-6.4 ms. The single-cache path reduced
+TTFT but did not reduce the measured peak-memory high-water mark on this setup;
+the Prefix Cache result is specifically for repeated, token-identical prompts.
 
 ## Resume wording after benchmark
 
-A conservative version before inserting real numbers:
-
 > Analyzed nanochat's autoregressive inference path and built a TTFT/TPOT/
-> throughput/VRAM benchmark. Implemented a single-sample KV-cache fast path to
-> remove redundant prefill-to-decode KV copying, and an exact-prefix LRU cache
-> that reuses KV, final prefill logits, and nanochat smear state across repeated
-> prompts; validated correctness with greedy decoding and ablation benchmarks.
-
-Once measured, replace the qualitative statement with your actual TTFT / memory
-numbers.
+> throughput/VRAM benchmark. On RTX 4060 with nanochat d14, reduced 2048-token
+> prompt TTFT from 48.06 to 46.72 ms (2.8%) by removing redundant single-sample
+> KV copying, and to 1.35 ms (97.2%) on exact-prefix hits; preserved greedy-token
+> equivalence across the upstream, optimized cold, and warm-cache paths.
 
 ## Scope
 
